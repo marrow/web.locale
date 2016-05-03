@@ -71,6 +71,9 @@ setup(
 			'localization', 'l10n',
 			'regionalization', 'r13n',
 			'globalization', 'g11n',
+			
+			# Abstract terms.
+			'language', 'number', 'currency', 'format', 'calendar', 'date', 'money'
 		],
 	classifiers = [
 			"Development Status :: 4 - Beta",
@@ -139,6 +142,14 @@ setup(
 	
 	install_requires = [
 			'marrow.package<2.0',  # dynamic execution and plugin management
+			
+			'webob',  # HTTP Accept header parsing
+			'babel',  # general internationalized formats, gettext catalog support
+			'money',  # internationalized money format
+			'pytz',  # timezone support
+			'l18n',  # Unicode CLDR datasets and common lazy string evaluation
+			'language-tags',  # IETF BCP-47 language tags
+			'babelfish',  # common Lanugage and Country abstraction
 		],
 	
 	extras_require = dict(
@@ -147,7 +158,8 @@ setup(
 			# Message catalog formats.  Use via extras definition: `web.locale[po,yaml]`
 			po = [],  # Included for completeness.
 			yaml = ['pyyaml'],  # YAML definition support.
-			json = [],  # Included for completeness.
+			json = ['pyslate'],  # JSON definition support.
+			mongo = ['pymongo>=3.0'],  # MongoDB-based definition support.
 			
 		),
 	
