@@ -119,24 +119,24 @@ setup(
 			
 			# Command-line scripts for administrative purposes.
 			'web.command': [
-					'cldr = web.command.cldr:cldr',  # Explore the Unicode CLDR datasets.
-					'translate = web.command.translate:translate',  # Query your application's message catalogs.
+					'cldr = cldr.update:update_cldr_dataset[cli]',  # Explore the Unicode CLDR datasets.
+					'translate = web.command.translate:translate[cli]',  # Query your application's message catalogs.
 				],
 			
 			# Additional command support/integration.
 			'web.clean': [
 					# Running `web clean` will remove compiled catalogs.
-					'messages = web.command.locale:clean_messages',
+					'messages = web.command.locale:clean_messages[cli]',
 				],
 			
 			'web.collect': [
 					# Running `web collect` will extract messages and update the message catalog sources.
-					'messages = web.command.locale:collect_messages',
+					'messages = web.command.locale:collect_messages[cli]',
 				],
 			
 			'web.compile': [
 					# Running `web compile` will compile message catalogs into efficient binary forms.
-					'messages = web.command.locale:compile_messages',
+					'messages = web.command.locale:compile_messages[cli]',
 				],
 		},
 	
@@ -161,6 +161,8 @@ setup(
 			json = ['pyslate'],  # JSON definition support.
 			mongo = ['pymongo>=3.0'],  # MongoDB-based definition support.
 			
+			# Feature tags.
+			cli = ['web.command']
 		),
 	
 	tests_require = tests_require,
