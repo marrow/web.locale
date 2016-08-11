@@ -143,6 +143,7 @@ setup(
 	install_requires = [
 			'marrow.package<2.0',  # dynamic execution and plugin management
 			
+			'xmltodict',  # Simple XML to Python object conversion.
 			'webob',  # HTTP Accept header parsing
 			'babel',  # general internationalized formats, gettext catalog support
 			'money',  # internationalized money format
