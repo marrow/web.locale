@@ -10,10 +10,13 @@ This library ships with a default set of SQLite databases, but they can be updat
 releases.
 """
 
+from __future__ import unicode_literals
+
 import os.path  # Cross-platform path manipulation.
 import pkg_resources  # Cross-platform package-relative path utilities.
 import sqlite3  # Local, efficient, queryable data storage.
 
+from marrow.package.loader import traverse  # Simplify lookup of data.
 from itertools import count  # Atomic counter used when determining latest version.
 from contextlib import contextmanager  # Shortens some of our code later.
 from requests import Session  # HTTP download management.
@@ -102,12 +105,14 @@ def _recreate(cursor, name, *fields):
 	except sqlite3.OperationalError:
 		pass
 	
-	cursor.execute("CREATE TABLE {} ({})".format(name, " text, ".join(fields) + ' text'))
+	fields = ["{} {}".format(*i[:2]) if isinstance(i, tuple) else "{} text".format(i) for i in fields]
+	
+	cursor.execute("CREATE TABLE {} ({})".format(name, ", ".join(fields)))
 
 
 def _extract_values(data, aliased, *names):
 	for i in data:
-		record = [i[name] for name in names]
+		record = [i.get(name[0] if isinstance(name, tuple) else name, None) for name in names]
 		
 		if aliased:
 			record.append(None)
@@ -115,20 +120,21 @@ def _extract_values(data, aliased, *names):
 		yield record
 		
 		if aliased and '@alias' in i:
-			record = [i['@alias' if name == '@name' else name] for name in names]
-			record.append(i['@name'])
-			
-			yield record
+			for alias in i['@alias'].split():
+				record = [alias if name == '@name' else i[name] for name in names]
+				record.append(i['@name'])
+				
+				yield record
 
 
 def _simple_store(name, cursor, data, aliased, *names):
 	if aliased:
-		field_names = list(names) + ['alias']
+		field_names = [i[0] if isinstance(i, tuple) else i for i in names] + ['alias']
 	else:
 		field_names = names
 	
 	_recreate(cursor, name, *field_names)
-	values = _extract_values(data, aliased, *[('@' + field) for field in names])
+	values = _extract_values(data, aliased, *[('@' + field[0], field[1]) if isinstance(field, tuple) else ('@' + field) for field in names])
 	sql = "INSERT INTO {} VALUES ({})".format(name, ('?, ' * len(field_names))[:-2])
 	cursor.executemany(sql, values)
 
@@ -149,36 +155,189 @@ class Dataset(object):
 				data.close()
 
 
+
+def to_date(value):
+	if not value: return value
+	from datetime import date
+	return date(*[int(i) for i in value.split('-')])
+
+
+def to_bool(value):
+	if value in [True, 1, "yes", "true"]:
+		return True
+	
+	if value in [False, 0, "no", "false"]:
+		return False
+	
+	return bool(value)
+
+
+class CurrencySupplementalDataset(Dataset):
+	NAME = 'currency'
+	PREFIX = 'supplemental'
+	
+	def extract_supplementalData(self, content, cursor):
+		rounding = traverse(content, 'supplementalData.currencyData.fractions.info')
+		
+		_simple_store('rounding', cursor, rounding, False,
+				'iso4217',
+				('digits', 'int'),
+				('rounding', 'int'),
+				('cashDigits', 'int'),
+				('cashRounding', 'int'))
+		
+		# This gets a bit more complex, as we need to store typecast, date-ranged data.
+		_recreate(cursor, 'region', 'region', 'currency', 'start', 'end', ('tender', 'bool'))
+		
+		values = []
+		for region in traverse(content, 'supplementalData.currencyData.region'):
+			for currency in (region['currency'] if isinstance(region['currency'], list) else [region['currency']]):
+				values.append((
+						region['@iso3166'],
+						currency['@iso4217'],
+						to_date(currency.get('@from', None)),
+						to_date(currency.get('@to', None)),
+						to_bool(currency.get('@tender', True)),
+					))
+		
+		cursor.executemany("INSERT INTO region VALUES (?, ?, ?, ?, ?)", values)
+
+
+
+
+class TerritorySupplementalDataset(Dataset):
+	NAME = 'territory'
+	PREFIX = 'supplemental'
+	
+	def extract_supplementalData(self, content, cursor):
+		# Prepare the data source and destination.
+		containment = traverse(content, 'supplementalData.territoryContainment.group')
+		languages = traverse(content, 'supplementalData.languageData.language')
+		
+		_recreate(cursor, 'containment', 'parent', 'child', 'intermediary')
+		_recreate(cursor, 'containment_path', 'territory', 'path')
+		_recreate(cursor, 'language', 'territory', 'language', 'script', ('secondary', 'bool'))
+		
+		# The containment of territories within eachother and within logical groupings, from UN data.
+		
+		values = []
+		mapping = {}
+		
+		for group in containment:
+			if group.get('@status', None) == 'deprecated': continue
+			members = group['@contains'].split()
+			intermediary = (group.get('status', None) == 'grouping') or all(i.isnumeric() for i in members)
+			for member in members:
+				mapping[member] = group['@type']
+				values.append((
+						group['@type'],
+						member,
+						intermediary
+					))
+		
+		cursor.executemany("INSERT INTO containment VALUES (?, ?, ?)", values)
+		
+		# A reverse mapping of these, to quickly look up a "breadcrumb" for display or navigation.
+		
+		values = []
+		
+		for key in mapping:
+			if key.isnumeric() or key == 'EU': continue
+			parent = mapping[key]
+			path = []
+			
+			while parent:
+				path.append(parent)
+				parent = mapping.get(parent, None)
+				if parent == '001': break
+			
+			values.append((key, ' '.join(path)))
+		
+		cursor.executemany("INSERT INTO containment_path VALUES (?, ?)", values)
+		
+		# languages typically associated with certain territories.
+		
+		values = []
+		
+		for language in languages:
+			if '@territories' not in language: continue
+			
+			for territory in language['@territories'].split():
+				for script in language['@scripts'].split() if '@scripts' in language else [None]:
+					values.append((
+							territory,
+							language['@type'],
+							script,
+							language.get('@alt', None) == 'secondary'
+						))
+		
+		cursor.executemany("INSERT INTO language VALUES (?, ?, ?, ?)", values)
+	
+	def extract_telephoneCodeData(self, content, cursor):
+		content = traverse(content, 'supplementalData.telephoneCodeData.codesByTerritory')
+		
+		_recreate(cursor, 'telephone_code', 'territory', 'code')
+		
+		values = []
+		for item in content:
+			codes = item['telephoneCountryCode']
+			
+			if not isinstance(codes, list):
+				codes = [codes]
+			
+			for code in codes:
+				values.append((item['@territory'], code['@code']))
+		
+		cursor.executemany("INSERT INTO telephone_code VALUES (?, ?)", values)
+
+
+
 class BCP47Dataset(Dataset):
 	NAME = 'bcp47'
 	
 	def extract_calendar(self, content, cursor):
 		"""This dataset contains: calendar algorithm, first day of week, and hour cycle."""
 		
-		parts = {i['@name']: i for i in content['ldmlBCP47']['keyword']['key']}
-		
-		def store_ca(data):
-			_simple_store('calendar_ca', cursor, data, True, 'name', 'description')
-		
-		def store_fw(data):
-			_simple_store('calendar_fw', cursor, data, False, 'name', 'description')
-		
-		def store_hc(data):
-			_simple_store('calendar_hc', cursor, data, False, 'name', 'description')
-		
-		__import__('pudb').set_trace()
-		
+		parts = {i['@name']: i for i in content['ldmlBCP47']['keyword']['key'] if not i.get('@deprecated', None)}
 		for key in parts:
-			locals()['store_' + key](parts[key]['type'])
-
-
-
+			_simple_store('calendar_' + key, cursor, parts[key]['type'], True, 'name', 'description')
+	
+	def extract_collation(self, content, cursor):
+		"""This dataset contains a large number of individal property sets."""
+		
+		parts = {i['@name']: i for i in content['ldmlBCP47']['keyword']['key'] if not i.get('@deprecated', None)}
+		for key in parts:
+			if key == 'kr': continue
+			_simple_store('collation_' + key, cursor, parts[key]['type'], True, 'name', 'description')
+	
+	def extract_currency(self, content, cursor):
+		parts = {i['@name']: i for i in content['ldmlBCP47']['keyword']['key'] if not i.get('@deprecated', None)}
+		for key in parts:
+			_simple_store('currency_' + key, cursor, parts[key]['type'], True, 'name', 'description')
+	
+	def extract_measure(self, content, cursor):
+		_simple_store('measure', cursor, content['ldmlBCP47']['keyword']['key']['type'], True, 'name', 'description')
+	
+	def extract_number(self, content, cursor):
+		_simple_store('number', cursor, content['ldmlBCP47']['keyword']['key']['type'], True, 'name', 'description')
+	
+	def extract_timezone(self, content, cursor):
+		_simple_store('timezone', cursor, content['ldmlBCP47']['keyword']['key']['type'], False, 'name', 'description', 'preferred', 'alias')
+	
+	def extract_variant(self, content, cursor):
+		_simple_store('variant_em', cursor, content['ldmlBCP47']['keyword']['key'][0]['type'], False, 'name', 'description', 'preferred', 'alias')
 
 
 def update_cldr_dataset():
 	fh = ZipFile('core.zip', 'r')
 	
 	ds = BCP47Dataset()
+	ds(fh)
+	
+	ds = CurrencySupplementalDataset()
+	ds(fh)
+	
+	ds = TerritorySupplementalDataset()
 	ds(fh)
 	
 	fh.close()
